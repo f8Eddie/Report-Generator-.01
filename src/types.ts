@@ -13,6 +13,7 @@ export interface IntegrationStatus {
   ateraConfigured: boolean;
   ateraTokenInfo: AteraTokenMetadata;
   microsoftConfigured: boolean;
+  microsoftClientId?: string | null;
   redirectUri: string;
   lastAteraSync: string | null;
   lastAteraError: string | null;

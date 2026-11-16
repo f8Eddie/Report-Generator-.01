@@ -230,6 +230,7 @@ function buildDashboardPayload(store: MspStore, req?: Request): DashboardPayload
       ateraConfigured: isAteraConfigured(store),
       ateraTokenInfo: getAteraTokenMetadata(store),
       microsoftConfigured: isMicrosoftConfigured(),
+      microsoftClientId: cleanEnv('MS_GRAPH_CLIENT_ID') || null,
       redirectUri: getMicrosoftRedirectUri(req),
       lastAteraSync: store.atera.lastSync,
       lastAteraError: store.atera.lastError,
@@ -1100,6 +1101,7 @@ async function startServer() {
       ateraConfigured: isAteraConfigured(store),
       ateraTokenInfo: getAteraTokenMetadata(store),
       microsoftConfigured: isMicrosoftConfigured(),
+      microsoftClientId: cleanEnv('MS_GRAPH_CLIENT_ID') || null,
       redirectUri: getMicrosoftRedirectUri(req),
       lastAteraSync: store.atera.lastSync,
       lastAteraError: store.atera.lastError,
@@ -1234,19 +1236,24 @@ async function startServer() {
 
   // Microsoft OAuth & Admin Consent Callback
   const handleMicrosoftCallback = async (req: Request, res: Response) => {
-    const renderPopupResult = (payload: Record<string, unknown>, message: string) => {
+    const renderPopupResult = (payload: Record<string, unknown>, title: string, subtitle?: string) => {
       const serialized = JSON.stringify(payload).replace(/</g, '\\u003c');
       res.send(`<!doctype html>
 <html>
-  <head><title>Microsoft 365 Connection</title></head>
-  <body style="font-family: system-ui, -apple-system, sans-serif; padding: 32px; background: #0f172a; color: #f8fafc;">
-    <p style="font-size: 14px;">${message}</p>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${title}</title>
+  </head>
+  <body style="margin: 0; font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f8fafc; color: #0f172a;">
+    <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 28px 36px; text-align: center; max-width: 420px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);">
+      <div style="font-size: 18px; font-weight: 600; color: #0357A3;">${title}</div>
+      ${subtitle ? `<p style="margin: 8px 0 0; font-size: 13px; color: #475569;">${subtitle}</p>` : ''}
+    </div>
     <script>
       if (window.opener) {
         window.opener.postMessage(${serialized}, '*');
         setTimeout(() => window.close(), 350);
-      } else {
-        window.location.href = '/';
       }
     </script>
   </body>
@@ -1258,27 +1265,60 @@ async function startServer() {
     if (error) {
       renderPopupResult(
         { type: 'MS_OAUTH_ERROR', error: errorDescription || error },
-        `Authentication canceled or failed: ${errorDescription || error}`
+        'Connection Failed',
+        errorDescription || error
       );
       return;
     }
 
+    const adminConsent = req.query.admin_consent === 'True' || req.query.admin_consent === 'true';
+    const consentedTenant = typeof req.query.tenant === 'string' ? req.query.tenant : null;
+    const code = typeof req.query.code === 'string' ? req.query.code : null;
+
     const stateKey = typeof req.query.state === 'string' ? req.query.state : '';
-    const stateEntry = oauthStates.get(stateKey);
-    oauthStates.delete(stateKey);
-    if (!stateEntry) {
+    const storedState = stateKey ? oauthStates.get(stateKey) : undefined;
+    if (stateKey) oauthStates.delete(stateKey);
+
+    // Support direct standalone Admin Consent links (generated without a popup state token)
+    if (!storedState && !adminConsent && !code) {
+      renderPopupResult(
+        { type: 'MS_OAUTH_SUCCESS' },
+        'Connected',
+        'You may close this window.'
+      );
+      return;
+    }
+
+    if (!storedState && code) {
       renderPopupResult(
         { type: 'MS_OAUTH_ERROR', error: 'Invalid or expired OAuth state token.' },
+        'Session Expired',
         'Invalid or expired OAuth state token. Please try connecting again.'
       );
       return;
     }
 
+    const stateEntry: OAuthStateEntry = storedState ?? {
+      createdAt: Date.now(),
+      ateraCustomerId: null,
+      flow: 'adminconsent',
+      requestedTenant: consentedTenant || 'organizations',
+    };
+
     const clientId = cleanEnv('MS_GRAPH_CLIENT_ID');
     const clientSecret = cleanEnv('MS_GRAPH_CLIENT_SECRET');
     if (!clientId || !clientSecret) {
+      if (adminConsent) {
+        renderPopupResult(
+          { type: 'MS_OAUTH_SUCCESS', tenantId: consentedTenant },
+          'Connected',
+          'Permissions accepted. You may close this window.'
+        );
+        return;
+      }
       renderPopupResult(
         { type: 'MS_OAUTH_ERROR', error: 'Server Microsoft credentials missing.' },
+        'Configuration Missing',
         'Server Microsoft Graph credentials are not configured.'
       );
       return;
@@ -1287,10 +1327,6 @@ async function startServer() {
     const redirectUri = getMicrosoftRedirectUri(req);
 
     try {
-      const adminConsent = req.query.admin_consent === 'True' || req.query.admin_consent === 'true';
-      const consentedTenant = typeof req.query.tenant === 'string' ? req.query.tenant : null;
-      const code = typeof req.query.code === 'string' ? req.query.code : null;
-
       let tenantId = consentedTenant || stateEntry.requestedTenant;
       let displayName = tenantId;
       let primaryDomain: string | null = null;
@@ -1431,11 +1467,16 @@ async function startServer() {
 
       renderPopupResult(
         { type: 'MS_OAUTH_SUCCESS', tenantId: existing.tenantId, displayName: existing.displayName },
-        `Connected ${existing.displayName}. Returning to AegisMSP...`
+        'Connected',
+        `${existing.displayName} connected. You may close this window.`
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unexpected Microsoft OAuth error.';
-      renderPopupResult({ type: 'MS_OAUTH_ERROR', error: msg }, `Connection failed: ${msg}`);
+      renderPopupResult(
+        { type: 'MS_OAUTH_ERROR', error: msg },
+        'Connection Failed',
+        msg
+      );
     }
   };
 

@@ -1,5 +1,5 @@
-import { Check, Copy, ExternalLink, Eye, EyeOff, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { Check, Copy, ExternalLink, Eye, EyeOff, KeyRound, Link2, RefreshCw, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import type { DashboardPayload } from '../types';
 import { formatRelativeTime } from '../utils/posture';
 
@@ -41,6 +41,23 @@ export function IntegrationsView({
   const [copiedUri, setCopiedUri] = useState(false);
   const [busyTenantId, setBusyTenantId] = useState<string | null>(null);
 
+  const [consentTenantInput, setConsentTenantInput] = useState('');
+  const [consentClientId, setConsentClientId] = useState(data.status.microsoftClientId ?? '');
+  const [copiedConsentUrl, setCopiedConsentUrl] = useState(false);
+
+  useEffect(() => {
+    if (!consentClientId && data.status.microsoftClientId) {
+      setConsentClientId(data.status.microsoftClientId);
+    }
+  }, [consentClientId, data.status.microsoftClientId]);
+
+  const generatedAdminConsentUrl = useMemo(() => {
+    const rawTenant = consentTenantInput.trim();
+    const tenantPart = rawTenant ? encodeURIComponent(rawTenant) : '{entraTenantID}';
+    const clientPart = encodeURIComponent(consentClientId.trim() || '{clientId}');
+    return `https://login.microsoftonline.com/${tenantPart}/v2.0/adminconsent?client_id=${clientPart}&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default`;
+  }, [consentTenantInput, consentClientId]);
+
   const sortedAteraCustomers = useMemo(
     () =>
       [...data.atera.customers].sort((a, b) =>
@@ -56,6 +73,16 @@ export function IntegrationsView({
       setTimeout(() => setCopiedUri(false), 2000);
     } catch {
       // Clipboard fallback not needed; URI is selectable text
+    }
+  };
+
+  const handleCopyAdminConsentUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(generatedAdminConsentUrl);
+      setCopiedConsentUrl(true);
+      setTimeout(() => setCopiedConsentUrl(false), 2000);
+    } catch {
+      // Selectable fallback
     }
   };
 
@@ -494,6 +521,78 @@ export function IntegrationsView({
               </button>
             </div>
           </form>
+
+          {/* Customer Admin Consent URL Creator */}
+          <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 space-y-2.5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 font-medium text-slate-800 dark:text-slate-200">
+                <Link2 className="w-3.5 h-3.5 text-[#0357A3] dark:text-[#5EA8E8]" />
+                <span>Customer Admin Consent URL Creator</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleCopyAdminConsentUrl}
+                className="h-7 px-2.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-white bg-[#0357A3] hover:bg-[#024785] rounded-md transition-colors"
+              >
+                {copiedConsentUrl ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                <span>{copiedConsentUrl ? 'Copied' : 'Copy Consent URL'}</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label
+                  htmlFor="consent-tenant-input"
+                  className="text-[11px] text-slate-600 dark:text-slate-400"
+                >
+                  Customer Entra Tenant ID or Domain
+                </label>
+                <div className="flex gap-1.5">
+                  <input
+                    id="consent-tenant-input"
+                    type="text"
+                    value={consentTenantInput}
+                    onChange={(e) => setConsentTenantInput(e.target.value)}
+                    placeholder="e.g. Tenant GUID or contoso.onmicrosoft.com"
+                    className="h-8 flex-1 px-2.5 text-xs font-mono bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-md text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setConsentTenantInput('organizations')}
+                    className="h-8 px-2 text-[11px] font-mono text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md"
+                    title="Fill generic multi-tenant organizations segment"
+                  >
+                    organizations
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  htmlFor="consent-client-input"
+                  className="text-[11px] text-slate-600 dark:text-slate-400"
+                >
+                  Application (Client) ID
+                </label>
+                <input
+                  id="consent-client-input"
+                  type="text"
+                  value={consentClientId}
+                  onChange={(e) => setConsentClientId(e.target.value)}
+                  placeholder="Azure App Client ID"
+                  className="h-8 w-full px-2.5 text-xs font-mono bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-md text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+                />
+              </div>
+            </div>
+
+            <div className="p-2.5 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all select-all">
+              {generatedAdminConsentUrl}
+            </div>
+
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              Send this link to the customer&apos;s Global Admin to grant permissions, then link their Tenant ID above. The callback endpoint renders a standalone <strong>Connected</strong> page with no redirect.
+            </p>
+          </div>
 
           {msMsg && (
             <div

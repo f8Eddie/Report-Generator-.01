@@ -1,5 +1,6 @@
 import {
   ClipboardPaste,
+  Download,
   FileText,
   HardDrive,
   ImagePlus,
@@ -19,6 +20,7 @@ import {
 } from 'react';
 import type { AteraAgent, AteraTicket } from '../types';
 import { formatShortDate, getScoreLabel, type UnifiedCustomerRow } from '../utils/posture';
+import { generateCustomerReportPdf } from '../utils/reportPdf';
 
 interface ReportNarrative {
   mspName: string;
@@ -732,6 +734,59 @@ export function CustomerReportsWorkspace({
     }
   }, [selectedCustomer, reportMonth, allCustomerTickets, currentPatchOverride.retiredDays, runFetch]);
 
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [pdfNotice, setPdfNotice] = useState<string | null>(null);
+
+  const handleSavePdf = async () => {
+    if (!selectedCustomer) return;
+    setExportingPdf(true);
+    setPdfNotice(null);
+    try {
+      await generateCustomerReportPdf({
+        customer: selectedCustomer,
+        monthLabel,
+        mspName: narrative.mspName,
+        overviewNote: narrative.overviewNote,
+        mdrNote: narrative.mdrNote,
+        nonCompliantNote: narrative.nonCompliantNote,
+        includeFullTicketTable: narrative.includeFullTicketTable,
+        ticketStats,
+        allCustomerTicketsCount: allCustomerTickets.length,
+        activeTicketSet,
+        patchingStats,
+        staleOrNonCompliant,
+        malwareAlertsCount: malwareAlerts.length,
+        activeRiskyUsersCount: activeRiskyUsers.length,
+        backup: {
+          enabled: currentBackup.enabled,
+          execSummaryNote: currentBackup.execSummaryNote,
+          sectionNote: currentBackup.sectionNote,
+          imageDataUrl: currentBackupImage,
+        },
+      });
+    } catch (err) {
+      setPdfNotice(
+        err instanceof Error ? `PDF export failed: ${err.message}` : 'Failed to generate PDF file.'
+      );
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
+  const handlePrint = () => {
+    setPdfNotice(null);
+    try {
+      window.print();
+    } catch {
+      // Ignore blocked print calls
+    }
+    if (typeof window !== 'undefined' && window.self !== window.top) {
+      setPdfNotice(
+        'If your browser print dialog was blocked inside the embedded preview, click Save as PDF to download the PDF directly or open the app in its own browser tab.'
+      );
+    }
+  };
+
   if (rows.length === 0) {
     return (
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-12 text-center space-y-2">
@@ -821,15 +876,35 @@ export function CustomerReportsWorkspace({
             </button>
           </div>
 
-          <button
-            type="button"
-            onClick={() => window.print()}
-            className="h-9 px-4 inline-flex items-center gap-2 text-xs font-medium text-white bg-[#0357A3] hover:bg-[#024785] rounded-lg transition-colors whitespace-nowrap shrink-0"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>Print / Save as PDF</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => void handleSavePdf()}
+              disabled={exportingPdf || !selectedCustomer}
+              className="h-9 px-4 inline-flex items-center gap-2 text-xs font-medium text-white bg-[#0357A3] hover:bg-[#024785] disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{exportingPdf ? 'Generating PDF...' : 'Save as PDF'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrint}
+              disabled={!selectedCustomer}
+              className="h-9 px-3 inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              title="Open browser print dialog (may be blocked inside embedded preview iframes)"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Print</span>
+            </button>
+          </div>
         </div>
+
+        {pdfNotice && (
+          <div className="p-3 rounded-lg border border-blue-200 dark:border-blue-900/60 bg-blue-50/70 dark:bg-blue-950/30 text-xs text-slate-700 dark:text-slate-300">
+            {pdfNotice}
+          </div>
+        )}
 
         {fetchWarnings.length > 0 && (
           <div className="p-3 rounded-lg border border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-300">
