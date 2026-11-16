@@ -1,5 +1,22 @@
-import { FileText, Printer, RefreshCw, SlidersHorizontal } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ClipboardPaste,
+  FileText,
+  HardDrive,
+  ImagePlus,
+  Printer,
+  RefreshCw,
+  SlidersHorizontal,
+  Trash2,
+} from 'lucide-react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent as ReactDragEvent,
+} from 'react';
 import type { AteraAgent, AteraTicket } from '../types';
 import { formatShortDate, getScoreLabel, type UnifiedCustomerRow } from '../utils/posture';
 
@@ -7,10 +24,69 @@ interface ReportNarrative {
   mspName: string;
   overviewNote: string;
   mdrNote: string;
-  includeBackup: boolean;
-  backupNote: string;
   nonCompliantNote: string;
   includeFullTicketTable: boolean;
+}
+
+interface CustomerBackupConfig {
+  enabled: boolean;
+  execSummaryNote: string;
+  sectionNote: string;
+  imagesByMonth: Record<string, string>;
+}
+
+const BACKUP_CONFIG_STORAGE_KEY = 'aegismsp_customer_backups_v1';
+
+const DEFAULT_BACKUP_CONFIG: CustomerBackupConfig = {
+  enabled: false,
+  execSummaryNote:
+    'The Microsoft 365 backup system has been running efficiently with no reported issues.',
+  sectionNote: 'Backups completed successfully with no reported issues.',
+  imagesByMonth: {},
+};
+
+function loadBackupConfigs(): Record<string, CustomerBackupConfig> {
+  try {
+    const raw = localStorage.getItem(BACKUP_CONFIG_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, CustomerBackupConfig>) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function compressImageBlobToDataUrl(blob: Blob): Promise<string> {
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read image data.'));
+    reader.readAsDataURL(blob);
+  });
+
+  if (blob.size <= 350_000) return rawDataUrl;
+
+  return new Promise<string>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const maxWidth = 1600;
+      const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+      const width = Math.max(1, Math.round(img.width * scale));
+      const height = Math.max(1, Math.round(img.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(rawDataUrl);
+        return;
+      }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', 0.88));
+    };
+    img.onerror = () => resolve(rawDataUrl);
+    img.src = rawDataUrl;
+  });
 }
 
 interface CustomerPatchOverride {
@@ -136,8 +212,6 @@ export function CustomerReportsWorkspace({
     overviewNote: '',
     mdrNote:
       'Managed Detection and Response monitoring operated smoothly throughout the reporting period, with Defender alerting active for high-priority threats.',
-    includeBackup: false,
-    backupNote: 'Microsoft 365 backups have been running efficiently with no reported issues.',
     nonCompliantNote:
       'Devices listed as non-compliant or inactive have not checked in for 3 or more weeks (e.g. retired, offline, or placed in storage).',
     includeFullTicketTable: true,
@@ -219,6 +293,177 @@ export function CustomerReportsWorkspace({
       return next;
     });
   };
+
+  const [backupConfigsMap, setBackupConfigsMap] = useState<Record<string, CustomerBackupConfig>>(
+    loadBackupConfigs
+  );
+  const [backupPasteMessage, setBackupPasteMessage] = useState<string | null>(null);
+  const backupFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const currentBackup: CustomerBackupConfig = useMemo(
+    () => (selectedKey ? backupConfigsMap[selectedKey] ?? DEFAULT_BACKUP_CONFIG : DEFAULT_BACKUP_CONFIG),
+    [backupConfigsMap, selectedKey]
+  );
+
+  const currentBackupImage = currentBackup.imagesByMonth[reportMonth] ?? null;
+
+  const updateCurrentBackup = useCallback(
+    (patch: Partial<CustomerBackupConfig>) => {
+      if (!selectedKey) return;
+      setBackupConfigsMap((prev) => {
+        const existing = prev[selectedKey] ?? DEFAULT_BACKUP_CONFIG;
+        const next = {
+          ...prev,
+          [selectedKey]: {
+            ...existing,
+            ...patch,
+            imagesByMonth: patch.imagesByMonth ?? existing.imagesByMonth,
+          },
+        };
+        try {
+          localStorage.setItem(BACKUP_CONFIG_STORAGE_KEY, JSON.stringify(next));
+          setBackupPasteMessage(null);
+        } catch {
+          setBackupPasteMessage(
+            'Screenshot added to current view, but browser storage is full — remove older screenshots if needed.'
+          );
+        }
+        return next;
+      });
+    },
+    [selectedKey]
+  );
+
+  const setCurrentBackupImage = useCallback(
+    async (blob: Blob) => {
+      try {
+        const dataUrl = await compressImageBlobToDataUrl(blob);
+        if (!selectedKey) return;
+        setBackupConfigsMap((prev) => {
+          const existing = prev[selectedKey] ?? DEFAULT_BACKUP_CONFIG;
+          const next = {
+            ...prev,
+            [selectedKey]: {
+              ...existing,
+              enabled: true,
+              imagesByMonth: {
+                ...existing.imagesByMonth,
+                [reportMonth]: dataUrl,
+              },
+            },
+          };
+          try {
+            localStorage.setItem(BACKUP_CONFIG_STORAGE_KEY, JSON.stringify(next));
+            setBackupPasteMessage(null);
+          } catch {
+            setBackupPasteMessage(
+              'Screenshot added for this session, but browser storage quota was reached.'
+            );
+          }
+          return next;
+        });
+      } catch {
+        setBackupPasteMessage('Could not read the pasted image. Try copying again or upload a PNG/JPG file.');
+      }
+    },
+    [selectedKey, reportMonth]
+  );
+
+  const clearCurrentBackupImage = useCallback(() => {
+    if (!selectedKey) return;
+    setBackupConfigsMap((prev) => {
+      const existing = prev[selectedKey] ?? DEFAULT_BACKUP_CONFIG;
+      const nextImages = { ...existing.imagesByMonth };
+      delete nextImages[reportMonth];
+      const next = {
+        ...prev,
+        [selectedKey]: {
+          ...existing,
+          imagesByMonth: nextImages,
+        },
+      };
+      try {
+        localStorage.setItem(BACKUP_CONFIG_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+    setBackupPasteMessage(null);
+  }, [selectedKey, reportMonth]);
+
+  const handleBackupZonePaste = useCallback(
+    (e: ReactClipboardEvent<HTMLElement>) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            e.preventDefault();
+            void setCurrentBackupImage(file);
+            return;
+          }
+        }
+      }
+    },
+    [setCurrentBackupImage]
+  );
+
+  const handleBackupDrop = useCallback(
+    (e: ReactDragEvent<HTMLElement>) => {
+      e.preventDefault();
+      const file = e.dataTransfer?.files?.[0];
+      if (file && file.type.startsWith('image/')) {
+        void setCurrentBackupImage(file);
+      }
+    },
+    [setCurrentBackupImage]
+  );
+
+  const handlePasteButtonClick = useCallback(async () => {
+    if (!navigator.clipboard?.read) {
+      setBackupPasteMessage('Click inside the paste box below and press Ctrl+V (or Cmd+V) to paste your screenshot.');
+      return;
+    }
+    try {
+      const clipboardItems = await navigator.clipboard.read();
+      for (const item of clipboardItems) {
+        const imgType = item.types.find((t) => t.startsWith('image/'));
+        if (imgType) {
+          const blob = await item.getType(imgType);
+          await setCurrentBackupImage(blob);
+          return;
+        }
+      }
+      setBackupPasteMessage('No image found in clipboard. Copy a screenshot first, then paste.');
+    } catch {
+      setBackupPasteMessage('Clipboard button blocked by browser — click the paste box below and press Ctrl+V (or Cmd+V).');
+    }
+  }, [setCurrentBackupImage]);
+
+  // Allow Ctrl+V / Cmd+V anywhere on the report when Backup is enabled and focus is outside text inputs
+  useEffect(() => {
+    if (!currentBackup.enabled) return;
+    const onWindowPaste = (e: ClipboardEvent) => {
+      const activeTag = document.activeElement?.tagName?.toLowerCase();
+      if (activeTag === 'input' || activeTag === 'textarea') return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            e.preventDefault();
+            void setCurrentBackupImage(file);
+            return;
+          }
+        }
+      }
+    };
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+  }, [currentBackup.enabled, setCurrentBackupImage]);
 
   const patchingStats = useMemo(() => {
     const allAgents = selectedCustomer?.agents ?? [];
@@ -550,6 +795,20 @@ export function CustomerReportsWorkspace({
 
             <button
               type="button"
+              onClick={() => updateCurrentBackup({ enabled: !currentBackup.enabled })}
+              className={`h-9 px-3.5 inline-flex items-center gap-1.5 text-xs font-medium border rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+                currentBackup.enabled
+                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800'
+                  : 'text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-950 border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
+              title="Toggle the optional Backups section for this customer"
+            >
+              <HardDrive className="w-3.5 h-3.5" />
+              <span>{currentBackup.enabled ? 'Backup: On' : 'Backup: Off'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setShowEditor((v) => !v)}
               className={`h-9 px-3.5 inline-flex items-center gap-1.5 text-xs font-medium border rounded-lg transition-colors whitespace-nowrap shrink-0 ${
                 showEditor
@@ -565,7 +824,7 @@ export function CustomerReportsWorkspace({
           <button
             type="button"
             onClick={() => window.print()}
-            className="h-9 px-4 inline-flex items-center gap-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            className="h-9 px-4 inline-flex items-center gap-2 text-xs font-medium text-white bg-[#0357A3] hover:bg-[#024785] rounded-lg transition-colors whitespace-nowrap shrink-0"
           >
             <Printer className="w-3.5 h-3.5" />
             <span>Print / Save as PDF</span>
@@ -633,11 +892,11 @@ export function CustomerReportsWorkspace({
               <label className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={narrative.includeBackup}
-                  onChange={(e) => setNarrative({ ...narrative, includeBackup: e.target.checked })}
+                  checked={currentBackup.enabled}
+                  onChange={(e) => updateCurrentBackup({ enabled: e.target.checked })}
                   className="rounded border-slate-300"
                 />
-                <span>Include Microsoft 365 Backup Summary</span>
+                <span>Include Backup Section for {selectedCustomer?.displayName}</span>
               </label>
 
               <label className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-300 cursor-pointer">
@@ -653,17 +912,31 @@ export function CustomerReportsWorkspace({
               </label>
             </div>
 
-            {narrative.includeBackup && (
-              <div className="md:col-span-2 space-y-1.5">
-                <label className="font-medium text-slate-700 dark:text-slate-300">
-                  Microsoft 365 Backup Status Note
-                </label>
-                <input
-                  type="text"
-                  value={narrative.backupNote}
-                  onChange={(e) => setNarrative({ ...narrative, backupNote: e.target.value })}
-                  className="h-9 w-full px-3 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-slate-100"
-                />
+            {currentBackup.enabled && (
+              <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-3 p-3 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800">
+                <div className="space-y-1.5">
+                  <label className="font-medium text-slate-700 dark:text-slate-300">
+                    Executive Summary Backup Note
+                  </label>
+                  <input
+                    type="text"
+                    value={currentBackup.execSummaryNote}
+                    onChange={(e) => updateCurrentBackup({ execSummaryNote: e.target.value })}
+                    className="h-9 w-full px-3 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-slate-100"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="font-medium text-slate-700 dark:text-slate-300">
+                    Backups Section Status Line
+                  </label>
+                  <input
+                    type="text"
+                    value={currentBackup.sectionNote}
+                    onChange={(e) => updateCurrentBackup({ sectionNote: e.target.value })}
+                    placeholder="e.g. AvePoint backups successful."
+                    className="h-9 w-full px-3 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-slate-100"
+                  />
+                </div>
               </div>
             )}
 
@@ -689,7 +962,7 @@ export function CustomerReportsWorkspace({
                         linuxPatched: '',
                       })
                     }
-                    className="text-[11px] font-medium text-blue-600 dark:text-blue-400 underline"
+                    className="text-[11px] font-medium text-[#0357A3] dark:text-[#5EA8E8] underline"
                   >
                     Reset to Auto
                   </button>
@@ -859,10 +1132,10 @@ export function CustomerReportsWorkspace({
                 </p>
               </div>
 
-              {narrative.includeBackup && (
+              {currentBackup.enabled && (
                 <div>
                   <div className="font-semibold text-slate-900">Microsoft 365 Backup</div>
-                  <p>{narrative.backupNote}</p>
+                  <p>{currentBackup.execSummaryNote}</p>
                 </div>
               )}
 
@@ -941,7 +1214,7 @@ export function CustomerReportsWorkspace({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
                 <table className="w-full text-left border-collapse border border-slate-200 text-xs">
                   <thead>
-                    <tr className="bg-blue-700 text-white font-semibold">
+                    <tr className="bg-[#0357A3] text-white font-semibold">
                       <th className="py-2 px-3 w-10">#</th>
                       <th className="py-2 px-3">Tag / Category</th>
                       <th className="py-2 px-3 text-right">Tickets</th>
@@ -1040,7 +1313,7 @@ export function CustomerReportsWorkspace({
                   <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse border border-slate-200 text-xs">
                       <thead>
-                        <tr className="bg-blue-700 text-white font-semibold">
+                        <tr className="bg-[#0357A3] text-white font-semibold">
                           <th className="py-2 px-3">Device Name</th>
                           <th className="py-2 px-3">User</th>
                           <th className="py-2 px-3">Device Type</th>
@@ -1115,7 +1388,7 @@ export function CustomerReportsWorkspace({
                           </div>
                           <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
                             <div
-                              className="h-full bg-blue-600 rounded-full"
+                              className="h-full bg-[#0357A3] rounded-full"
                               style={{ width: `${Math.min(100, c.percentage)}%` }}
                             />
                           </div>
@@ -1185,7 +1458,7 @@ export function CustomerReportsWorkspace({
                   </div>
                   <table className="w-full text-left border-collapse border border-slate-200 text-xs">
                     <thead>
-                      <tr className="bg-blue-700 text-white font-semibold">
+                      <tr className="bg-[#0357A3] text-white font-semibold">
                         <th className="py-2 px-3">Device Name</th>
                         <th className="py-2 px-3">Last Sync / Update</th>
                         <th className="py-2 px-3">OS Platform</th>
@@ -1265,7 +1538,7 @@ export function CustomerReportsWorkspace({
                     )}
                   <table className="w-full text-left border-collapse border border-slate-200 text-xs">
                     <thead>
-                      <tr className="bg-blue-700 text-white font-semibold">
+                      <tr className="bg-[#0357A3] text-white font-semibold">
                         <th className="py-2 px-3">Role Display Name</th>
                         <th className="py-2 px-3">User Principal Name</th>
                         <th className="py-2 px-3">Display Name</th>
@@ -1306,6 +1579,114 @@ export function CustomerReportsWorkspace({
             )}
           </section>
 
+          {/* Optional Section 5: Backups (Per-customer toggle + clipboard screenshot paste) */}
+          {currentBackup.enabled && (
+            <section
+              onPaste={handleBackupZonePaste}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={handleBackupDrop}
+              className="space-y-4 pt-6 border-t border-slate-200 break-inside-avoid"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-display text-lg font-semibold text-slate-900">Backups</h2>
+                <div className="print:hidden flex flex-wrap items-center gap-2">
+                  <input
+                    ref={backupFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) void setCurrentBackupImage(file);
+                      e.target.value = '';
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handlePasteButtonClick()}
+                    className="h-7 px-2.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md"
+                  >
+                    <ClipboardPaste className="w-3 h-3" />
+                    <span>{currentBackupImage ? 'Paste Replacement' : 'Paste Screenshot'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => backupFileInputRef.current?.click()}
+                    className="h-7 px-2.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md"
+                  >
+                    <ImagePlus className="w-3 h-3" />
+                    <span>Upload Image</span>
+                  </button>
+                  {currentBackupImage && (
+                    <button
+                      type="button"
+                      onClick={clearCurrentBackupImage}
+                      className="h-7 px-2.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-md"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>Remove Image</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => updateCurrentBackup({ enabled: false })}
+                    className="h-7 px-2.5 text-[11px] font-medium text-slate-500 hover:text-slate-800 border border-slate-200 rounded-md"
+                  >
+                    Turn Off
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <p className="text-sm text-slate-700">{currentBackup.sectionNote}</p>
+                <div className="print:hidden">
+                  <input
+                    type="text"
+                    value={currentBackup.sectionNote}
+                    onChange={(e) => updateCurrentBackup({ sectionNote: e.target.value })}
+                    aria-label="Backup status caption"
+                    placeholder="e.g. Backups: AvePoint backups successful."
+                    className="w-full max-w-xl h-8 px-2.5 text-xs text-slate-800 bg-slate-50 border border-slate-200 rounded-md"
+                  />
+                </div>
+              </div>
+
+              {backupPasteMessage && (
+                <p className="print:hidden text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5">
+                  {backupPasteMessage}
+                </p>
+              )}
+
+              {currentBackupImage ? (
+                <div className="border border-slate-200 rounded-lg overflow-hidden bg-white p-2">
+                  <img
+                    src={currentBackupImage}
+                    alt={`${selectedCustomer.displayName} backup status`}
+                    className="w-full h-auto max-h-[680px] object-contain mx-auto"
+                  />
+                </div>
+              ) : (
+                <div
+                  tabIndex={0}
+                  onPaste={handleBackupZonePaste}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={handleBackupDrop}
+                  className="print:hidden border-2 border-dashed border-slate-300 focus:border-[#0357A3] focus:outline-none rounded-lg p-8 text-center space-y-2 bg-slate-50/70 cursor-pointer"
+                  onClick={() => setBackupPasteMessage('Ready to paste: press Ctrl+V (or Cmd+V) now to insert your copied screenshot.')}
+                >
+                  <ClipboardPaste className="w-6 h-6 text-slate-400 mx-auto" />
+                  <div className="text-xs font-medium text-slate-700">
+                    Click here and press <span className="font-mono px-1.5 py-0.5 bg-white border border-slate-200 rounded">Ctrl+V</span> /{' '}
+                    <span className="font-mono px-1.5 py-0.5 bg-white border border-slate-200 rounded">Cmd+V</span> to paste backup screenshot
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Or drag and drop an image here, or click <strong>Upload Image</strong> above.
+                  </p>
+                </div>
+              )}
+            </section>
+          )}
+
           {/* Optional Appendix: Full Ticket Table */}
           {narrative.includeFullTicketTable && activeTicketSet.length > 0 && (
             <section className="space-y-3 pt-6 border-t border-slate-200">
@@ -1314,7 +1695,7 @@ export function CustomerReportsWorkspace({
               </h2>
               <table className="w-full text-left border-collapse border border-slate-200 text-xs">
                 <thead>
-                  <tr className="bg-blue-700 text-white font-semibold">
+                  <tr className="bg-[#0357A3] text-white font-semibold">
                     <th className="py-2 px-3">ID</th>
                     <th className="py-2 px-3">Title</th>
                     <th className="py-2 px-3">Tag / Category</th>
@@ -1362,7 +1743,7 @@ function TicketDonutSvg({
   open: number;
 }) {
   const segments = [
-    { label: 'Closed Within SLA', count: closedWithin, color: '#2563EB' },
+    { label: 'Closed Within SLA', count: closedWithin, color: '#0357A3' },
     { label: 'Closed Outside SLA', count: closedOutside, color: '#DC2626' },
     { label: 'No SLA Applied', count: noSla, color: '#64748B' },
     { label: 'Open', count: open, color: '#D97706' },
@@ -1494,7 +1875,7 @@ function MiniScoreTrend({
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-14" aria-hidden="true">
-      <path d={path} fill="none" stroke="#2563EB" strokeWidth="2" strokeLinecap="round" />
+      <path d={path} fill="none" stroke="#0357A3" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }
