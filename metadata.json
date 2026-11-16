@@ -1,0 +1,6 @@
+{
+  "name": "AegisMSP",
+  "description": "Multi-tenant MSP security posture console linking Atera RMM and Microsoft 365 Defender Secure Scores across customers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
